@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # REQUIRED for Streamlit Cloud
 import matplotlib.pyplot as plt
 import joblib
 from io import BytesIO
@@ -14,9 +16,13 @@ st.set_page_config(
 )
 
 # -----------------------------
-# Load trained Random Forest model
+# Load trained Random Forest model (cached)
 # -----------------------------
-rf = joblib.load("cpu_rf_labeled_model.pkl")
+@st.cache_resource
+def load_model():
+    return joblib.load("cpu_rf_labeled_model.pkl")
+
+rf = load_model()
 
 # -----------------------------
 # Sidebar UI
@@ -26,7 +32,8 @@ uploaded_file = st.sidebar.file_uploader(
     "Upload your CPU usage CSV file", type=["csv"]
 )
 st.sidebar.markdown("---")
-st.sidebar.markdown("**CSV format:** Timestamp,cpu_usage")
+st.sidebar.markdown("**Required CSV format:**")
+st.sidebar.code("Timestamp,cpu_usage")
 
 # -----------------------------
 # Main container
@@ -34,83 +41,101 @@ st.sidebar.markdown("**CSV format:** Timestamp,cpu_usage")
 st.title("🖥️ CPU Anomaly Detection Dashboard")
 st.markdown(
     """
-Detect CPU anomalies using **Random Forest trained on labeled data**.
+Detect CPU anomalies using **Random Forest trained on labeled data**.  
 Red points indicate detected anomalies.
 """
 )
 
 if uploaded_file:
-    # -----------------------------
-    # Load uploaded CSV
-    # -----------------------------
-    df = pd.read_csv(uploaded_file)
-    
-    # Convert timestamp to datetime
-    if df['Timestamp'].dtype != 'datetime64[ns]':
-        df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+    try:
+        # -----------------------------
+        # Load uploaded CSV
+        # -----------------------------
+        df = pd.read_csv(uploaded_file)
 
-    # -----------------------------
-    # Feature Engineering
-    # -----------------------------
-    WINDOW_SIZE = 5
-    df['rolling_mean'] = df['cpu_usage'].rolling(WINDOW_SIZE).mean()
-    df['rolling_std'] = df['cpu_usage'].rolling(WINDOW_SIZE).std()
-    df['rolling_min'] = df['cpu_usage'].rolling(WINDOW_SIZE).min()
-    df['rolling_max'] = df['cpu_usage'].rolling(WINDOW_SIZE).max()
-    df['delta'] = df['cpu_usage'].diff()
-    df.dropna(inplace=True)
+        # Validate columns
+        if not {"Timestamp", "cpu_usage"}.issubset(df.columns):
+            st.error("CSV must contain 'Timestamp' and 'cpu_usage' columns.")
+            st.stop()
 
-    FEATURES = ['cpu_usage','rolling_mean','rolling_std','rolling_min','rolling_max','delta']
+        # Convert timestamp safely
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+        df.dropna(subset=["Timestamp", "cpu_usage"], inplace=True)
 
-    # -----------------------------
-    # Predict anomalies
-    # -----------------------------
-    df['anomaly'] = rf.predict(df[FEATURES])
+        # -----------------------------
+        # Feature Engineering
+        # -----------------------------
+        WINDOW_SIZE = 5
+        df["rolling_mean"] = df["cpu_usage"].rolling(WINDOW_SIZE).mean()
+        df["rolling_std"] = df["cpu_usage"].rolling(WINDOW_SIZE).std()
+        df["rolling_min"] = df["cpu_usage"].rolling(WINDOW_SIZE).min()
+        df["rolling_max"] = df["cpu_usage"].rolling(WINDOW_SIZE).max()
+        df["delta"] = df["cpu_usage"].diff()
+        df.dropna(inplace=True)
 
-    # -----------------------------
-    # Interactive plot
-    # -----------------------------
-    st.subheader("CPU Usage Over Time")
-    fig, ax = plt.subplots(figsize=(12,5))
-    ax.plot(df['Timestamp'], df['cpu_usage'], color='lightgray', label='CPU Usage', zorder=1)
-    ax.scatter(df['Timestamp'][df['anomaly']==1], df['cpu_usage'][df['anomaly']==1], 
-               color='red', s=80, label='Detected Anomaly', zorder=5)
-    ax.set_xlabel("Timestamp")
-    ax.set_ylabel("CPU Usage (%)")
-    ax.set_title("CPU Usage with Random Forest Anomaly Detection")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    st.pyplot(fig)
+        FEATURES = [
+            "cpu_usage",
+            "rolling_mean",
+            "rolling_std",
+            "rolling_min",
+            "rolling_max",
+            "delta",
+        ]
 
-    # -----------------------------
-    # Downloadable PNG
-    # -----------------------------
-    buf = BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight')
-    buf.seek(0)
-    st.download_button(
-        label="Download Plot as PNG",
-        data=buf,
-        file_name="cpu_anomaly_plot.png",
-        mime="image/png"
-    )
+        # -----------------------------
+        # Predict anomalies
+        # -----------------------------
+        df["anomaly"] = rf.predict(df[FEATURES])
 
-    # -----------------------------
-    # Download predictions CSV
-    # -----------------------------
-    csv_buffer = df.to_csv(index=False).encode()
-    st.download_button(
-        label="Download Predictions CSV",
-        data=csv_buffer,
-        file_name="cpu_anomaly_predictions.csv",
-        mime="text/csv"
-    )
+        # -----------------------------
+        # Plot
+        # -----------------------------
+        st.subheader("CPU Usage Over Time")
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.plot(df["Timestamp"], df["cpu_usage"], label="CPU Usage")
+        ax.scatter(
+            df[df["anomaly"] == 1]["Timestamp"],
+            df[df["anomaly"] == 1]["cpu_usage"],
+            s=80,
+            label="Detected Anomaly",
+        )
+        ax.set_xlabel("Timestamp")
+        ax.set_ylabel("CPU Usage (%)")
+        ax.legend()
+        ax.grid(alpha=0.3)
+        st.pyplot(fig)
 
-    # -----------------------------
-    # Show table of anomalies
-    # -----------------------------
-    st.subheader("Detected Anomalies")
-    st.dataframe(df[df['anomaly']==1][['Timestamp','cpu_usage']])
+        # -----------------------------
+        # Download PNG
+        # -----------------------------
+        buf = BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+        st.download_button(
+            "Download Plot as PNG",
+            buf,
+            "cpu_anomaly_plot.png",
+            "image/png",
+        )
+
+        # -----------------------------
+        # Download CSV
+        # -----------------------------
+        st.download_button(
+            "Download Predictions CSV",
+            df.to_csv(index=False).encode(),
+            "cpu_anomaly_predictions.csv",
+            "text/csv",
+        )
+
+        # -----------------------------
+        # Anomaly Table
+        # -----------------------------
+        st.subheader("Detected Anomalies")
+        st.dataframe(df[df["anomaly"] == 1][["Timestamp", "cpu_usage"]])
+
+    except Exception as e:
+        st.error(f"Error processing file: {e}")
 
 else:
     st.info("Upload a CSV file from the sidebar to see anomaly predictions.")
